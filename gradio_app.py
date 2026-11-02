@@ -118,40 +118,34 @@ print("\nAll models loaded. Ready for inference!\n")
 
 def predict_roberta(text):
     """Run RoBERTa inference on a single text."""
-    cleaned = clean_text_roberta(text)
     encoding = roberta_tokenizer(
-        cleaned,
+        clean_text_roberta(text),
         truncation=True,
         padding="max_length",
         max_length=MAX_LEN,
-        return_tensors="pt"
-    )
-    input_ids = encoding["input_ids"].to(device)
-    attention_mask = encoding["attention_mask"].to(device)
-
+        return_tensors="pt",
+    ).to(device)
     with torch.no_grad():
-        outputs = roberta_model(input_ids=input_ids, attention_mask=attention_mask)
-        logits = outputs.logits
-        probs = torch.softmax(logits.float(), dim=1).cpu().numpy()[0]
-
-    return probs
+        logits = roberta_model(**encoding).logits
+    return torch.softmax(logits.float(), dim=1).cpu().numpy()[0]
 
 
 def predict_lr(text):
     """Run Logistic Regression inference on a single text."""
-    cleaned = clean_text_baseline(text)
-    tfidf_vec = tfidf.transform([cleaned])
-    probs = lr_model.predict_proba(tfidf_vec)[0]
-    return probs
+    return lr_model.predict_proba(tfidf.transform([clean_text_baseline(text)]))[0]
 
 
 def predict_svm(text):
-    """Run Linear SVM inference on a single text."""
-    cleaned = clean_text_baseline(text)
-    tfidf_vec = tfidf.transform([cleaned])
-    raw_scores = svm_model.decision_function(tfidf_vec)
-    probs = scipy_softmax(raw_scores, axis=1)[0]
-    return probs
+    """Run Linear SVM inference on a single text (softmax over decision scores)."""
+    scores = svm_model.decision_function(tfidf.transform([clean_text_baseline(text)]))
+    return scipy_softmax(scores, axis=1)[0]
+
+
+MODELS = [
+    ("RoBERTa", predict_roberta),
+    ("Logistic Regression", predict_lr),
+    ("Linear SVM", predict_svm),
+]
 
 
 def format_label(label_name):
@@ -160,47 +154,21 @@ def format_label(label_name):
 
 
 def classify_comment(text):
-    """
-    Main classification function called by Gradio.
-    Returns prediction results from all 3 models.
-    """
+    """Classify with all 3 models; returns one {label: confidence} dict per model plus a summary."""
     if not text or not text.strip():
-        return (
-            {},  # RoBERTa
-            {},  # LR
-            {},  # SVM
-            "Please enter a comment to classify."
-        )
+        return {}, {}, {}, "Please enter a comment to classify."
 
-    # Get predictions from all 3 models
-    roberta_probs = predict_roberta(text)
-    lr_probs = predict_lr(text)
-    svm_probs = predict_svm(text)
+    results, rows, preds = [], [], set()
+    for name, predict in MODELS:
+        probs = predict(text)
+        top = int(np.argmax(probs))
+        results.append({format_label(label): float(p) for label, p in zip(TARGET_NAMES, probs)})
+        rows.append(f"| **{name}** | {format_label(TARGET_NAMES[top])} | {probs[top]:.1%} |")
+        preds.add(top)
 
-    # Format as {label: confidence} dicts for Gradio Label component
-    roberta_result = {format_label(TARGET_NAMES[i]): float(roberta_probs[i]) for i in range(NUM_LABELS)}
-    lr_result = {format_label(TARGET_NAMES[i]): float(lr_probs[i]) for i in range(NUM_LABELS)}
-    svm_result = {format_label(TARGET_NAMES[i]): float(svm_probs[i]) for i in range(NUM_LABELS)}
-
-    # Summary text
-    roberta_pred = TARGET_NAMES[np.argmax(roberta_probs)]
-    lr_pred = TARGET_NAMES[np.argmax(lr_probs)]
-    svm_pred = TARGET_NAMES[np.argmax(svm_probs)]
-
-    agreement = "✅ All 3 models agree!" if roberta_pred == lr_pred == svm_pred else "⚠️ Models disagree — review individual predictions."
-
-    summary = f"""### Prediction Summary
-
-| Model | Predicted Class | Confidence |
-|---|---|---|
-| **RoBERTa** | {format_label(roberta_pred)} | {roberta_probs[np.argmax(roberta_probs)]:.1%} |
-| **Logistic Regression** | {format_label(lr_pred)} | {lr_probs[np.argmax(lr_probs)]:.1%} |
-| **Linear SVM** | {format_label(svm_pred)} | {svm_probs[np.argmax(svm_probs)]:.1%} |
-
-{agreement}
-"""
-
-    return roberta_result, lr_result, svm_result, summary
+    agreement = "✅ All 3 models agree!" if len(preds) == 1 else "⚠️ Models disagree — review individual predictions."
+    summary = "### Prediction Summary\n\n| Model | Predicted Class | Confidence |\n|---|---|---|\n" + "\n".join(rows) + f"\n\n{agreement}\n"
+    return (*results, summary)
 
 
 # =============================================================================
